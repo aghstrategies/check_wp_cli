@@ -1,0 +1,176 @@
+#!/usr/bin/env php
+<?php
+/**
+ * Copyright 2019 AGH Strategies, LLC
+ * Released under the Affero GNU Public License version 3
+ * but with NO WARRANTY: neither the implied warranty of merchantability
+ * nor fitness for a particular purpose
+ */
+
+// | Argument                  | Description                             |
+// | ------------------------- | --------------------------------------- |
+// | **-p /path/to/wordpress** | the directory of the site               |
+// | -x /path/to/cv            | the path to the `wp` executable         |
+// | -M "c"                    | core major updates: warning or critical |
+// | -m "w"                    | core minor updates: warning or critical |
+// | -T "w"                    | theme updates: warning or critical      |
+// | -P "w"                    | plugin updates: warning or critical     |
+// | -d                        | even check disabled plugins & themes    |
+
+/**
+ * Tools for running WP-CLI checks for WordPress core, plugin, and theme update
+ * status.
+ */
+class wpCheck {
+
+  public $path;
+  public $wp;
+  public $exitVal = 0;
+  public $checkDisabled;
+  public $themeSeverity;
+  public $pluginSeverity;
+  public $severities = [];
+  private $checks = ['core'];
+
+  const sectionHeaders = [
+    'core' => '==== WordPress Core ====',
+    'plugin' => '==== Plugins ====',
+    'theme' => '==== Themes ====',
+  ];
+
+  const wcMap = [
+    'w' => 'WARNING',
+    'c' => 'CRITICAL',
+  ];
+
+  const exitCodes = [
+    'OK' => 0,
+    'WARNING' => 1,
+    'CRITICAL' => 2,
+    'UNKNOWN' => 3,
+  ];
+
+  public $details = [];
+
+  public function __construct($options) {
+    $this->path = escapeshellarg($options['p']);
+    $this->wp = (array_key_exists('x', $options) && is_executable($options['x'])) ? $options['x'] : 'wp';
+    $this->checkDisabled = array_key_exists('d', $options);
+    $this->severities = [
+      'major' => array_key_exists('M', $options) ? $options['M'] : 'c',
+      'minor' => array_key_exists('m', $options) ? $options['m'] : 'w',
+    ];
+    if (array_key_exists('T', $options)) {
+      $this->severities['theme'] = $options['T'];
+      $this->checks[] = 'theme';
+    }
+    if (array_key_exists('P', $options)) {
+      $this->severities['plugin'] = $options['P'];
+      $this->checks[] = 'plugin';
+    }
+  }
+
+  public function runCheck() {
+    $checkResults = [];
+    foreach ($this->checks as $type) {
+      $sectionSeverity = NULL;
+      $status = $this->getOutput($type);
+      if (is_array($status)) {
+        $checkResults[$type] = [];
+        foreach ($status as $item) {
+          if ($type == 'core') {
+            $itemSeverity = self::wcMap[$this->severities[$item['update_type']]];
+            $checkResults[$type][] = "[$itemSeverity] WordPress {$item['version']} available";
+            if (empty($sectionSeverity)) {
+              $sectionSeverity = $itemSeverity;
+            }
+            elseif ($sectionSeverity != $itemSeverity) {
+              // It can only be `WARNING` or `CRITICAL` at this point, so if they
+              // differ, go with the higher severity
+              $sectionSeverity = 'CRITICAL';
+            }
+          }
+          else {
+            // Skip past up-to-date themes & plugins
+            if (empty($item['update_version'])) {
+              continue;
+            }
+            $sectionSeverity = self::wcMap[$this->severities[$type]];
+            $checkResults[$type][] = "[$sectionSeverity] {$item['title']} {$item['version']} -> {$item['update_version']}";
+          }
+        }
+      }
+      elseif (!is_null($status)) {
+        $sectionSeverity = 'UNKNOWN';
+        $checkResults[$type] = ['[UNKNOWN] Problem checking status'];
+      }
+      if (empty($checkResults[$type])) {
+        $sectionSeverity = 'OK';
+        $checkResults[$type] = ['[OK] No updates needed'];
+      }
+      $this->details[] = self::sectionHeaders[$type];
+      $this->details = array_merge($this->details, $checkResults[$type]);
+      $this->exitVal = max($this->exitVal, self::exitCodes[$sectionSeverity]);
+    }
+
+    $summaryStatus = array_search($this->exitVal, self::exitCodes) . ': ';
+    $summaryNote = [];
+    foreach ($this->checks as $type) {
+      if (strpos($checkResults[$type][0], '[OK]') === 0) {
+        continue;
+      }
+      if ($type == 'core') {
+        $summaryNote[] = 'Core update';
+      }
+      else {
+        $s = (count($checkResults[$type]) == 1) ? '' : 's';
+        $summaryNote[] = count($checkResults[$type]) . " $type$s";
+      }
+    }
+    array_unshift($this->details, $summaryStatus . implode(', ', $summaryNote));
+  }
+
+  public function exitWithMessage() {
+    echo implode(PHP_EOL, $this->details);
+    exit($this->exitVal);
+  }
+
+  protected function getOutput($type = 'core') {
+    $commandParts = [
+      $this->wp,
+      "--path=$this->path",
+      $type,
+    ];
+    if ($type == 'core') {
+      // Something like
+      // `$this->wp --path=$this->path core check-update --format=json`
+      $commandParts[] = 'check-update';
+    }
+    else {
+      // Something like:
+      // `$this->wp --path=$this->path $type list --fields="name, version, update_version, title" --format=json`;
+      $commandParts[] = 'list';
+      if (!$this->checkDisabled) {
+        $commandParts[] = '--status=active';
+      }
+      $commandParts[] = '--fields="name, version, update_version, title"';
+    }
+    $commandParts[] = '--format=json';
+    $raw = shell_exec(implode(' ', $commandParts));
+
+    return json_decode(trim($raw), TRUE);
+  }
+
+}
+
+$options = getopt('p:x:M:m:T:P:d');
+
+// Require a path
+if (empty($options['p'])) {
+  echo 'Path to your site is required, e.g. `check_wp_cli -p "/path/to/my/site"`';
+  exit(3);
+}
+
+$wpCheck = new wpCheck($options);
+$wpCheck->runCheck();
+$wpCheck->exitWithMessage();
