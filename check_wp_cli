@@ -156,9 +156,16 @@ class wpCheck {
       $commandParts[] = '--fields="name, version, update_version, title"';
     }
     $commandParts[] = '--format=json';
-    $raw = shell_exec(implode(' ', $commandParts));
+    exec(implode(' ', $commandParts), $raw, $exitCode);
 
-    return json_decode(trim($raw), TRUE);
+    if ($exitCode) {
+      array_unshift($raw, 'UNKNOWN: Error executing WP-CLI');
+      $this->details = $raw;
+      $this->exitVal = 3;
+      $this->exitWithMessage();
+    }
+
+    return json_decode(implode(PHP_EOL, $raw), TRUE);
   }
 
 }
